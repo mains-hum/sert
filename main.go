@@ -15,41 +15,21 @@ import (
 const (
 	cR = "\033[0m"
 	cO = "\033[32m"
-	cW = "\033[33m"
 	cI = "\033[36m"
 	cP = "/etc/sert/configuration.yaml"
 )
 
 type FileDef struct {
 	Content string      `yaml:"content"`
-	Owner   string      `yaml:"owner"`
 	Perm    os.FileMode `yaml:"perm"`
 }
 
-type UserDef struct {
-	FullName string   `yaml:"full_name"`
-	Groups   []string `yaml:"groups"`
-	Shell    string   `yaml:"shell"`
-}
-
-type SystemDef struct {
-	Hostname string            `yaml:"hostname"`
-	Timezone string            `yaml:"timezone"`
-	Env      map[string]string `yaml:"env"`
-}
-
-type BootDef struct {
-	User   string `yaml:"user"`
-	Script string `yaml:"script"`
-}
-
 type Config struct {
-	System    SystemDef              `yaml:"system"`
-	Boot      BootDef                `yaml:"boot"`
-	Users     map[string]UserDef     `yaml:"users"`
+	System struct {
+		Timezone string `yaml:"timezone"`
+	} `yaml:"system"`
 	Imports   []string               `yaml:"imports"`
 	Packages  []string               `yaml:"packages"`
-	Services  []string               `yaml:"services"`
 	Flatpaks  []string               `yaml:"flatpak-apps"`
 	Variables map[string]interface{} `yaml:"variables"`
 	Files     map[string]FileDef     `yaml:"files"`
@@ -66,14 +46,6 @@ func run(show bool, args ...string) string {
 	return string(out)
 }
 
-func u(s []string) []string {
-	m, l := make(map[string]bool), make([]string, 0, len(s))
-	for _, e := range s {
-		if !m[e] { m[e], l = true, append(l, e) }
-	}
-	return l
-}
-
 func loadConfig(path string, vis map[string]bool) (Config, error) {
 	var c Config
 	p, _ := filepath.Abs(filepath.Clean(path))
@@ -84,23 +56,17 @@ func loadConfig(path string, vis map[string]bool) (Config, error) {
 	yaml.Unmarshal(d, &c)
 	if c.Variables == nil { c.Variables = make(map[string]interface{}) }
 	if c.Files == nil { c.Files = make(map[string]FileDef) }
-	if c.Users == nil { c.Users = make(map[string]UserDef) }
 	dir := filepath.Dir(p)
 	for _, i := range c.Imports {
 		if !filepath.IsAbs(i) { i = filepath.Join(dir, i) }
 		if sc, err := loadConfig(i, vis); err == nil {
-			if sc.System.Hostname != "" && c.System.Hostname == "" { c.System.Hostname = sc.System.Hostname }
 			if sc.System.Timezone != "" && c.System.Timezone == "" { c.System.Timezone = sc.System.Timezone }
 			c.Packages = append(c.Packages, sc.Packages...)
-			c.Services = append(c.Services, sc.Services...)
 			c.Flatpaks = append(c.Flatpaks, sc.Flatpaks...)
 			for k, v := range sc.Variables { c.Variables[k] = v }
 			for k, v := range sc.Files { c.Files[k] = v }
-			for k, v := range sc.Users { c.Users[k] = v }
-			if sc.Boot.Script != "" && c.Boot.Script == "" { c.Boot = sc.Boot }
 		}
 	}
-	c.Packages, c.Services, c.Flatpaks = u(c.Packages), u(c.Services), u(c.Flatpaks)
 	return c, nil
 }
 
@@ -109,44 +75,23 @@ func main() {
 		fmt.Println("Error: root privileges required")
 		os.Exit(1)
 	}
-	if len(os.Args) < 2 || os.Args[1] != "reconf" {
-		fmt.Println("Usage: sert reconf")
-		os.Exit(1)
-	}
 	cfg, err := loadConfig(cP, make(map[string]bool))
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	funcMap := template.FuncMap{
-		"stringsTrimPrefix": func(prefix string, s interface{}) string {
-			return strings.TrimPrefix(fmt.Sprintf("%v", s), prefix)
-		},
-	}
-
-	if cfg.System.Hostname != "" {
-		os.WriteFile("/etc/hostname", []byte(cfg.System.Hostname+"\n"), 0644)
-		run(false, "hostname", cfg.System.Hostname)
-	}
-
+	// 1. Timezone
 	if cfg.System.Timezone != "" {
 		src := filepath.Join("/usr/share/zoneinfo", cfg.System.Timezone)
 		if _, err := os.Stat(src); err == nil {
 			os.Remove("/etc/localtime")
 			os.Symlink(src, "/etc/localtime")
+			fmt.Printf("%sTIME:%s Set to %s\n", cI, cR, cfg.System.Timezone)
 		}
 	}
 
-	for name, def := range cfg.Users {
-		g := strings.Join(def.Groups, ",")
-		if run(false, "id", "-u", name) == "" {
-			run(true, "useradd", "-m", "-c", def.FullName, "-s", def.Shell, "-G", g, name)
-		} else {
-			run(false, "usermod", "-s", def.Shell, "-G", g, name)
-		}
-	}
-
+	// 2. APK Packages
 	for _, p := range cfg.Packages {
 		if run(false, "apk", "info", "-e", p) == "" {
 			fmt.Printf("%sPKG:%s Installing %s...\n", cI, cR, p)
@@ -154,64 +99,45 @@ func main() {
 		}
 	}
 
-	for _, s := range cfg.Services {
-		src := filepath.Join("/etc/dinit.d", s)
-		dst := filepath.Join("/etc/dinit.d/boot.d", s)
-		if _, err := os.Stat(src); err == nil {
-			if _, err := os.Lstat(dst); os.IsNotExist(err) {
-				fmt.Printf("%sSVC:%s Enabling %s...\n", cI, cR, s)
-				os.Symlink(src, dst)
-			}
-			run(false, "dinitctl", "start", s)
+	// 3. Flatpak
+	if len(cfg.Flatpaks) > 0 {
+		run(false, "flatpak", "remote-add", "--if-not-exists", "flathub", "https://flathub.org/repo/flathub.flatpakrepo")
+		for _, f := range cfg.Flatpaks {
+			fmt.Printf("%sFLAT:%s Installing %s...\n", cI, cR, f)
+			run(true, "flatpak", "install", "-y", "flathub", f)
 		}
 	}
 
-	for _, app := range cfg.Flatpaks {
-		run(true, "flatpak", "install", "-y", "flathub", app)
+	// 4. Files & Templates
+	userName := fmt.Sprintf("%v", cfg.Variables["user"])
+	funcMap := template.FuncMap{
+		"trim": func(s string) string { return strings.TrimPrefix(s, "#") },
 	}
 
 	for p, d := range cfg.Files {
-		pt, _ := template.New("path").Parse(p)
-		var pb bytes.Buffer
-		pt.Execute(&pb, cfg.Variables)
-		t := pb.String()
-		if strings.Contains(t, "<no value>") { continue }
+		tPath := strings.ReplaceAll(p, "~/", "/home/"+userName+"/")
+		os.MkdirAll(filepath.Dir(tPath), 0755)
 
-		if strings.HasPrefix(t, "~/") {
-			u := fmt.Sprintf("%v", cfg.Variables["user"])
-			t = filepath.Join("/home", u, t[2:])
+		tmpl, err := template.New("file").Funcs(funcMap).Parse(d.Content)
+		if err != nil {
+			fmt.Printf("%sERR:%s Template error in %s: %v\n", cI, cR, tPath, err)
+			continue
 		}
 
-		os.MkdirAll(filepath.Dir(t), 0755)
-		tmpl, _ := template.New("file").Funcs(funcMap).Parse(d.Content)
 		var b bytes.Buffer
-		tmpl.Execute(&b, cfg.Variables)
+		if err := tmpl.Execute(&b, cfg.Variables); err != nil {
+			fmt.Printf("%sERR:%s Execute error in %s: %v\n", cI, cR, tPath, err)
+			continue
+		}
 
 		perm := d.Perm
 		if perm == 0 { perm = 0644 }
-		os.WriteFile(t, b.Bytes(), perm)
-		fmt.Printf("%sFILE:%s %s\n", cI, cR, t)
+		os.WriteFile(tPath, b.Bytes(), perm)
+		fmt.Printf("%sFILE:%s %s\n", cI, cR, tPath)
 
-		owner := d.Owner
-		if owner == "" && strings.HasPrefix(t, "/home/") {
-			u := fmt.Sprintf("%v", cfg.Variables["user"])
-			owner = u + ":" + u
-		} else if owner != "" {
-			ot, _ := template.New("owner").Parse(owner)
-			var ob bytes.Buffer
-			ot.Execute(&ob, cfg.Variables)
-			owner = ob.String()
-		}
-
-		if owner != "" {
-			run(false, "chown", owner, t)
-			curr := filepath.Dir(t)
-			for strings.HasPrefix(curr, "/home/") {
-				run(false, "chown", owner, curr)
-				curr = filepath.Dir(curr)
-				if curr == "/home" || curr == "/" { break }
-			}
+		if strings.HasPrefix(tPath, "/home/"+userName) {
+			run(false, "chown", "-R", userName+":"+userName, filepath.Join("/home", userName))
 		}
 	}
-	fmt.Printf("\n%sDONE:%s System reconfigured\n", cO, cR)
+	fmt.Printf("\n%sDONE:%s Reconfigured\n", cO, cR)
 }
