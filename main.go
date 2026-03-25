@@ -223,7 +223,8 @@ func applyHostname(name string) {
 	logOK("HOST", name)
 }
 
-func applyPackages(pkgs []string) {
+func applyPackages(pkgs []string) []string {
+	var failed []string
 	repoFile := "/etc/apk/repositories"
 	data, err := os.ReadFile(repoFile)
 	if err == nil {
@@ -231,27 +232,30 @@ func applyPackages(pkgs []string) {
 		if strings.Contains(content, "#http") {
 			newContent := strings.ReplaceAll(content, "#http", "http")
 			os.WriteFile(repoFile, []byte(newContent), 0644)
-			logInfo("REPO", "Enabled all branches (contrib/community)")
+			logInfo("REPO", "Enabled all branches")
 			mustRun(true, "apk", "update")
 		}
 	}
 
-	// ЭТАП 2: Установка пакетов
 	if len(pkgs) == 0 {
-		return
+		return failed
 	}
 	pkgs = dedup(pkgs)
-	var toInstall []string
+	
 	for _, p := range pkgs {
 		out, _ := run(false, "apk", "info", "-e", p)
 		if out == "" {
-			toInstall = append(toInstall, p)
+			logInfo("PKG", "Installing "+p+"...")
+			_, err := run(true, "apk", "add", p)
+			if err != nil {
+				logErr("Failed to install " + p)
+				failed = append(failed, p)
+			} else {
+				logOK("PKG", p+" installed")
+			}
 		}
 	}
-	if len(toInstall) > 0 {
-		args := append([]string{"apk", "add"}, toInstall...)
-		mustRun(true, args...)
-	}
+	return failed
 }
 
 func applyFlatpaks(apps []string) {
@@ -396,11 +400,22 @@ func cmdReconf() {
 		applyTimezone(cfg.System.Timezone)
 	}
 	applyUsers(cfg.Users)
-	applyPackages(cfg.Packages)
+	
+	failedPkgs := applyPackages(cfg.Packages)
+	
 	applyFlatpaks(cfg.Flatpaks)
 	changed := applyFiles(cfg.Files, cfg.Variables)
 	applyServices(cfg.Services, changed)
 	applyAutologin(cfg.Autologin)
+	
+	if len(failedPkgs) > 0 {
+		fmt.Printf("\n%s%s%sThe following packages failed to install:%s\n", cBold, cRed, strings.Repeat("-", 10), cR)
+		for _, p := range failedPkgs {
+			fmt.Printf("  - %s\n", p)
+		}
+		fmt.Println()
+	}
+	
 	logOK("DONE", "System reconfigured")
 }
 
