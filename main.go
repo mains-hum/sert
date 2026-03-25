@@ -224,24 +224,19 @@ func applyHostname(name string) {
 }
 
 func applyPackages(pkgs []string) {
-	// Активируем все ветки репозиториев Chimera
 	repoFile := "/etc/apk/repositories"
 	data, err := os.ReadFile(repoFile)
 	if err == nil {
 		content := string(data)
-		changed := false
-		// Раскомментируем строки с официальными зеркалами (contrib, community и т.д.)
 		if strings.Contains(content, "#http") {
-			content = strings.ReplaceAll(content, "#http", "http")
-			changed = true
-		}
-		if changed {
-			os.WriteFile(repoFile, []byte(content), 0644)
-			logInfo("APK", "Enabled community/contrib repos")
+			newContent := strings.ReplaceAll(content, "#http", "http")
+			os.WriteFile(repoFile, []byte(newContent), 0644)
+			logInfo("REPO", "Enabled all branches (contrib/community)")
 			mustRun(true, "apk", "update")
 		}
 	}
 
+	// ЭТАП 2: Установка пакетов
 	if len(pkgs) == 0 {
 		return
 	}
