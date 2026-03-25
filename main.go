@@ -224,6 +224,24 @@ func applyHostname(name string) {
 }
 
 func applyPackages(pkgs []string) {
+	// Активируем все ветки репозиториев Chimera
+	repoFile := "/etc/apk/repositories"
+	data, err := os.ReadFile(repoFile)
+	if err == nil {
+		content := string(data)
+		changed := false
+		// Раскомментируем строки с официальными зеркалами (contrib, community и т.д.)
+		if strings.Contains(content, "#http") {
+			content = strings.ReplaceAll(content, "#http", "http")
+			changed = true
+		}
+		if changed {
+			os.WriteFile(repoFile, []byte(content), 0644)
+			logInfo("APK", "Enabled community/contrib repos")
+			mustRun(true, "apk", "update")
+		}
+	}
+
 	if len(pkgs) == 0 {
 		return
 	}
@@ -255,8 +273,8 @@ func applyFlatpaks(apps []string) {
 func renderAtomic(target string, content string, vars map[string]interface{}, perm os.FileMode) (bool, error) {
 	fm := template.FuncMap{
 		"trim":    func(s string) string { return strings.TrimPrefix(s, "#") },
-		"upper":   strings.ToUpper,
-		"lower":   strings.ToLower,
+		"upper":    strings.ToUpper,
+		"lower":    strings.ToLower,
 		"replace": strings.ReplaceAll,
 		"default": func(def, val interface{}) interface{} {
 			if val == nil || val == "" {
