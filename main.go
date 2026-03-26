@@ -75,25 +75,18 @@ func logErr(msg string)       { fmt.Printf("%s%sERR:    %s %s\n", cBold, cRed, c
 
 func run(show bool, args ...string) (string, error) {
 	cmd := exec.Command(args[0], args[1:]...)
-	var stdout, stderr bytes.Buffer
 	if show {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-	} else {
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
+		err := cmd.Run()
+		return "", err
 	}
-	err := cmd.Run()
-	if err != nil {
-		return strings.TrimSpace(stderr.String()), err
-	}
-	return strings.TrimSpace(stdout.String()), nil
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
 }
 
 func mustRun(show bool, args ...string) {
-	if _, err := run(show, args...); err != nil {
-		logErr(fmt.Sprintf("Command %v failed: %v", args, err))
-	}
+	run(show, args...)
 }
 
 func loadConfig(path string, visited map[string]bool) (Config, error) {
@@ -241,10 +234,10 @@ func applyPackages(pkgs []string) []string {
 		return failed
 	}
 	pkgs = dedup(pkgs)
-	
+
 	for _, p := range pkgs {
-		out, _ := run(false, "apk", "info", "-e", p)
-		if out == "" {
+		out, err := run(false, "apk", "info", "-e", p)
+		if err != nil || out == "" {
 			logInfo("PKG", "Installing "+p+"...")
 			_, err := run(true, "apk", "add", p)
 			if err != nil {
@@ -272,8 +265,8 @@ func applyFlatpaks(apps []string) {
 func renderAtomic(target string, content string, vars map[string]interface{}, perm os.FileMode) (bool, error) {
 	fm := template.FuncMap{
 		"trim":    func(s string) string { return strings.TrimPrefix(s, "#") },
-		"upper":    strings.ToUpper,
-		"lower":    strings.ToLower,
+		"upper":   strings.ToUpper,
+		"lower":   strings.ToLower,
 		"replace": strings.ReplaceAll,
 		"default": func(def, val interface{}) interface{} {
 			if val == nil || val == "" {
@@ -400,14 +393,14 @@ func cmdReconf() {
 		applyTimezone(cfg.System.Timezone)
 	}
 	applyUsers(cfg.Users)
-	
+
 	failedPkgs := applyPackages(cfg.Packages)
-	
+
 	applyFlatpaks(cfg.Flatpaks)
 	changed := applyFiles(cfg.Files, cfg.Variables)
 	applyServices(cfg.Services, changed)
 	applyAutologin(cfg.Autologin)
-	
+
 	if len(failedPkgs) > 0 {
 		fmt.Printf("\n%s%s%sThe following packages failed to install:%s\n", cBold, cRed, strings.Repeat("-", 10), cR)
 		for _, p := range failedPkgs {
@@ -415,7 +408,7 @@ func cmdReconf() {
 		}
 		fmt.Println()
 	}
-	
+
 	logOK("DONE", "System reconfigured")
 }
 
