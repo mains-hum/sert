@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -229,12 +230,10 @@ func applyPackages(pkgs []string) []string {
 			mustRun(true, "apk", "update")
 		}
 	}
-
 	if len(pkgs) == 0 {
 		return failed
 	}
 	pkgs = dedup(pkgs)
-
 	for _, p := range pkgs {
 		out, err := run(false, "apk", "info", "-e", p)
 		if err != nil || out == "" {
@@ -308,6 +307,13 @@ func expandPath(p, userName string) string {
 
 func applyFiles(files map[string]FileDef, vars map[string]interface{}) bool {
 	userName := fmt.Sprintf("%v", vars["user"])
+	u, err := user.Lookup(userName)
+	uid, gid := -1, -1
+	if err == nil {
+		ui, _ := strconv.Atoi(u.Uid)
+		gi, _ := strconv.Atoi(u.Gid)
+		uid, gid = ui, gi
+	}
 	changedAny := false
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -324,6 +330,14 @@ func applyFiles(files map[string]FileDef, vars map[string]interface{}) bool {
 			if err != nil {
 				logErr(fmt.Sprintf("File %s: %v", target, err))
 				return
+			}
+			if uid != -1 {
+				dir := filepath.Dir(target)
+				for dir != "/" && dir != "." {
+					os.Chown(dir, uid, gid)
+					dir = filepath.Dir(dir)
+				}
+				os.Chown(target, uid, gid)
 			}
 			if changed {
 				mu.Lock()
@@ -393,14 +407,11 @@ func cmdReconf() {
 		applyTimezone(cfg.System.Timezone)
 	}
 	applyUsers(cfg.Users)
-
 	failedPkgs := applyPackages(cfg.Packages)
-
 	applyFlatpaks(cfg.Flatpaks)
 	changed := applyFiles(cfg.Files, cfg.Variables)
 	applyServices(cfg.Services, changed)
 	applyAutologin(cfg.Autologin)
-
 	if len(failedPkgs) > 0 {
 		fmt.Printf("\n%s%s%sThe following packages failed to install:%s\n", cBold, cRed, strings.Repeat("-", 10), cR)
 		for _, p := range failedPkgs {
@@ -408,7 +419,6 @@ func cmdReconf() {
 		}
 		fmt.Println()
 	}
-
 	logOK("DONE", "System reconfigured")
 }
 
